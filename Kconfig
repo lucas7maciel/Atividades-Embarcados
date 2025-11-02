@@ -1,0 +1,12 @@
+menu "Zephyr"
+source "Kconfig.zephyr"
+
+config HELLO_TIMER_PERIOD_MS
+	int "Intervalo do Hello World (ms)"
+	range 100 10000
+	default 1000
+	help
+	  Ajusta o periodo, em milissegundos, do timer periodico que imprime a
+	  mensagem Hello World. Valores muito baixos podem congestionar o log.
+
+endmenu
