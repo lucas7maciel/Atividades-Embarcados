@@ -1,216 +1,229 @@
-#include <errno.h>
-#include <stdbool.h>
-#include <zephyr/device.h>
-#include <zephyr/devicetree.h>
-#include <zephyr/drivers/gpio.h>
-#include <zephyr/drivers/pwm.h>
-#include <zephyr/fff.h>
 #include <zephyr/kernel.h>
 #include <zephyr/logging/log.h>
 #include <zephyr/sys/util.h>
 
 LOG_MODULE_REGISTER(app, LOG_LEVEL_INF);
 
-DEFINE_FFF_GLOBALS;
-
-#define LED_GPIO_NODE DT_ALIAS(led0)
-#define LED_PWM_NODE DT_ALIAS(pwm_led0)
-#define BUTTON_NODE DT_ALIAS(sw0)
-
-BUILD_ASSERT(DT_NODE_HAS_STATUS(LED_GPIO_NODE, okay),
-	     "Alias led0 nao definido ou desabilitado");
-BUILD_ASSERT(DT_NODE_HAS_STATUS(LED_PWM_NODE, okay),
-	     "Alias pwm_led0 nao definido ou desabilitado");
-BUILD_ASSERT(DT_NODE_HAS_STATUS(BUTTON_NODE, okay),
-	     "Alias sw0 nao definido ou desabilitado");
-
-static const struct gpio_dt_spec led_gpio = GPIO_DT_SPEC_GET(LED_GPIO_NODE,
-							     gpios);
-static const struct pwm_dt_spec led_pwm = PWM_DT_SPEC_GET(LED_PWM_NODE);
-static const struct gpio_dt_spec button = GPIO_DT_SPEC_GET(BUTTON_NODE,
-							   gpios);
-
-enum led_mode {
-	LED_MODE_GPIO = 0,
-	LED_MODE_PWM,
-	LED_MODE_COUNT
+enum sensor_type {
+	SENSOR_TEMPERATURE = 0,
+	SENSOR_HUMIDITY,
+	SENSOR_TYPE_COUNT
 };
 
-static const uint32_t pwm_step_us =
-	MAX(1U, (CONFIG_LED_PWM_PERIOD_US * CONFIG_LED_PWM_STEP_PCT) / 100U);
+enum sensor_error {
+	SENSOR_ERR_TOO_LOW = 0,
+	SENSOR_ERR_TOO_HIGH
+};
 
-static inline void pwm_apply(uint32_t pulse_us)
+struct sensor_reading {
+	enum sensor_type type;
+	int16_t value;
+	int64_t timestamp_ms;
+};
+
+struct sensor_fault {
+	struct sensor_reading sample;
+	enum sensor_error error;
+	int16_t min_expected;
+	int16_t max_expected;
+};
+
+/* Buffer das filas (cada item é copiado para essa região estática) */
+#define QUEUE_ALIGNMENT 4
+
+K_MSGQ_DEFINE(input_queue, sizeof(struct sensor_reading),
+	      CONFIG_FILTER_QUEUE_DEPTH, QUEUE_ALIGNMENT);
+K_MSGQ_DEFINE(output_queue, sizeof(struct sensor_reading),
+	      CONFIG_FILTER_QUEUE_DEPTH, QUEUE_ALIGNMENT);
+K_MSGQ_DEFINE(error_queue, sizeof(struct sensor_fault),
+	      CONFIG_FILTER_QUEUE_DEPTH, QUEUE_ALIGNMENT);
+
+#define PRODUCER_STACK_SIZE 1024
+#define FILTER_STACK_SIZE 1024
+#define CONSUMER_STACK_SIZE 1024
+#define LOGGER_STACK_SIZE 1024
+
+#define PRODUCER_PRIORITY 5
+#define FILTER_PRIORITY 4
+#define CONSUMER_PRIORITY 6
+#define LOGGER_PRIORITY 6
+
+static const int16_t temperature_pattern[] = { 21, 17, 19, 35, 28, 14, 30, 26 };
+static const int16_t humidity_pattern[] = { 45, 32, 55, 68, 72, 60, 38, 66 };
+
+static const char *const sensor_names[] = {
+	[SENSOR_TEMPERATURE] = "Temperatura",
+	[SENSOR_HUMIDITY] = "Umidade",
+};
+
+static void producer_thread(void *pattern_ptr, void *type_ptr, void *unused)
 {
-	int ret = pwm_set_dt(&led_pwm, CONFIG_LED_PWM_PERIOD_US, pulse_us);
+	const int16_t *pattern = pattern_ptr;
+	const enum sensor_type type = POINTER_TO_INT(type_ptr);
+	const size_t pattern_len =
+		(type == SENSOR_TEMPERATURE) ? ARRAY_SIZE(temperature_pattern) :
+					       ARRAY_SIZE(humidity_pattern);
+	size_t index = 0;
+	const uint32_t sleep_ms = (type == SENSOR_TEMPERATURE) ?
+				      CONFIG_TEMP_PRODUCER_INTERVAL_MS :
+				      CONFIG_HUM_PRODUCER_INTERVAL_MS;
 
-	if (ret < 0) {
-		LOG_ERR("Falha ao ajustar PWM: %d", ret);
+	ARG_UNUSED(unused);
+
+	while (true) {
+		struct sensor_reading sample = {
+			.type = type,
+			.value = pattern[index],
+			.timestamp_ms = k_uptime_get(),
+		};
+
+		int ret = k_msgq_put(&input_queue, &sample, K_FOREVER);
+
+		if (ret == 0) {
+			LOG_DBG("%s produzida: %d",
+				sensor_names[sample.type], sample.value);
+		} else {
+			LOG_ERR("Falha ao enfileirar amostra (%d)", ret);
+		}
+
+		index = (index + 1U) % pattern_len;
+
+		k_msleep(sleep_ms);
 	}
 }
 
-static bool read_button_pressed(void)
+static bool validate_reading(const struct sensor_reading *sample,
+			     int16_t *min_allowed, int16_t *max_allowed,
+			     enum sensor_error *error)
 {
-	int value = gpio_pin_get_dt(&button);
+	switch (sample->type) {
+	case SENSOR_TEMPERATURE:
+		*min_allowed = CONFIG_TEMP_VALID_MIN_C;
+		*max_allowed = CONFIG_TEMP_VALID_MAX_C;
+		break;
+	case SENSOR_HUMIDITY:
+		*min_allowed = CONFIG_HUM_VALID_MIN_PCT;
+		*max_allowed = CONFIG_HUM_VALID_MAX_PCT;
+		break;
+	default:
+		/* Não deveria ocorrer */
+		*min_allowed = INT16_MIN;
+		*max_allowed = INT16_MAX;
+		break;
+	}
 
-	if (value < 0) {
-		LOG_ERR("Falha ao ler botao: %d", value);
+	if (sample->value < *min_allowed) {
+		*error = SENSOR_ERR_TOO_LOW;
 		return false;
 	}
 
-	bool pressed = (value != 0);
-
-	if ((button.dt_flags & GPIO_ACTIVE_LOW) != 0U) {
-		pressed = !pressed;
+	if (sample->value > *max_allowed) {
+		*error = SENSOR_ERR_TOO_HIGH;
+		return false;
 	}
 
-	return pressed;
+	return true;
 }
 
-static bool button_was_pressed(void)
+static void filter_thread(void *, void *, void *)
 {
-	static bool last_state;
-	static int64_t last_transition_ms;
-	const bool current_state = read_button_pressed();
-	const int64_t now = k_uptime_get();
+	while (true) {
+		struct sensor_reading sample;
+		int ret = k_msgq_get(&input_queue, &sample, K_FOREVER);
 
-	if (current_state != last_state &&
-	    (now - last_transition_ms) >= CONFIG_BUTTON_DEBOUNCE_MS) {
-		last_state = current_state;
-		last_transition_ms = now;
-		return current_state;
+		if (ret != 0) {
+			LOG_ERR("Falha ao ler fila de entrada (%d)", ret);
+			continue;
+		}
+
+		int16_t min_allowed = 0;
+		int16_t max_allowed = 0;
+		enum sensor_error error_flag = SENSOR_ERR_TOO_LOW;
+
+		const bool valid = validate_reading(&sample, &min_allowed,
+						    &max_allowed, &error_flag);
+
+		if (valid) {
+			ret = k_msgq_put(&output_queue, &sample, K_FOREVER);
+			if (ret != 0) {
+				LOG_ERR("Falha ao enviar dado válido (%d)", ret);
+			}
+		} else {
+			struct sensor_fault fault = {
+				.sample = sample,
+				.error = error_flag,
+				.min_expected = min_allowed,
+				.max_expected = max_allowed,
+			};
+
+			ret = k_msgq_put(&error_queue, &fault, K_FOREVER);
+			if (ret != 0) {
+				LOG_ERR("Falha ao enviar dado inválido (%d)",
+					ret);
+			}
+		}
 	}
-
-	return false;
 }
+
+static void consumer_thread(void *, void *, void *)
+{
+	while (true) {
+		struct sensor_reading sample;
+		int ret = k_msgq_get(&output_queue, &sample, K_FOREVER);
+
+		if (ret != 0) {
+			LOG_ERR("Falha ao ler fila de saída (%d)", ret);
+			continue;
+		}
+
+		LOG_INF("Consumidor recebeu %s = %d (t=%lld ms)",
+			sensor_names[sample.type], sample.value,
+			sample.timestamp_ms);
+	}
+}
+
+static void error_logger_thread(void *, void *, void *)
+{
+	while (true) {
+		struct sensor_fault fault;
+		int ret = k_msgq_get(&error_queue, &fault, K_FOREVER);
+
+		if (ret != 0) {
+			LOG_ERR("Falha ao ler fila de erro (%d)", ret);
+			continue;
+		}
+
+		const char *direction =
+			(fault.error == SENSOR_ERR_TOO_LOW) ? "abaixo" :
+							      "acima";
+
+		LOG_WRN("%s inconsistente (%s do esperado): valor=%d, faixa [%d, %d], t=%lld ms",
+			sensor_names[fault.sample.type], direction,
+			fault.sample.value, fault.min_expected,
+			fault.max_expected, fault.sample.timestamp_ms);
+	}
+}
+
+K_THREAD_DEFINE(temp_producer_id, PRODUCER_STACK_SIZE, producer_thread,
+		(void *)temperature_pattern, INT_TO_POINTER(SENSOR_TEMPERATURE),
+		NULL, PRODUCER_PRIORITY, 0, 0);
+K_THREAD_DEFINE(hum_producer_id, PRODUCER_STACK_SIZE, producer_thread,
+		(void *)humidity_pattern, INT_TO_POINTER(SENSOR_HUMIDITY), NULL,
+		PRODUCER_PRIORITY, 0, 0);
+K_THREAD_DEFINE(filter_id, FILTER_STACK_SIZE, filter_thread, NULL, NULL, NULL,
+		FILTER_PRIORITY, 0, 0);
+K_THREAD_DEFINE(consumer_id, CONSUMER_STACK_SIZE, consumer_thread, NULL, NULL,
+		NULL, CONSUMER_PRIORITY, 0, 0);
+K_THREAD_DEFINE(logger_id, LOGGER_STACK_SIZE, error_logger_thread, NULL, NULL,
+		NULL, LOGGER_PRIORITY, 0, 0);
 
 int main(void)
 {
-	int err;
+	LOG_INF("Sistema de estufa inteligente inicializado");
 
-	if (!device_is_ready(led_gpio.port)) {
-		LOG_ERR("GPIO do LED indisponivel");
-		return -ENODEV;
-	}
-
-	if (!device_is_ready(led_pwm.dev)) {
-		LOG_ERR("Controlador PWM indisponivel");
-		return -ENODEV;
-	}
-
-	if (!device_is_ready(button.port)) {
-		LOG_ERR("GPIO do botao indisponivel");
-		return -ENODEV;
-	}
-
-	err = gpio_pin_configure_dt(&button, GPIO_INPUT);
-	if (err < 0) {
-		LOG_ERR("Falha ao configurar botao: %d", err);
-		return err;
-	}
-
-	err = gpio_pin_configure_dt(&led_gpio, GPIO_OUTPUT_INACTIVE);
-	if (err < 0) {
-		LOG_ERR("Falha ao configurar LED: %d", err);
-		return err;
-	}
-
-	err = pwm_set_dt(&led_pwm, CONFIG_LED_PWM_PERIOD_US, 0U);
-	if (err < 0) {
-		LOG_ERR("Falha ao inicializar PWM: %d", err);
-		return err;
-	}
-
-	LOG_INF("Atividade 2 inicializada. Modo padrao: GPIO");
-
-	bool led_on = false;
-	uint32_t pwm_pulse_us = 0U;
-	int pwm_direction = 1;
-	int current_mode = LED_MODE_GPIO;
-
-	int last_mode = current_mode;
-	int64_t next_gpio_toggle_ms = k_uptime_get() +
-				      CONFIG_LED_BLINK_INTERVAL_MS;
-	int64_t next_pwm_step_ms = k_uptime_get() +
-				   CONFIG_LED_PWM_STEP_INTERVAL_MS;
-
+	/* A thread main permanece viva apenas como guardião */
 	while (true) {
-		const int64_t now = k_uptime_get();
-		const bool pressed = button_was_pressed();
-
-		if (pressed) {
-			current_mode = (current_mode + 1) % LED_MODE_COUNT;
-
-			LOG_INF("Botao pressionado -> modo %s",
-				(current_mode == LED_MODE_GPIO) ? "GPIO" :
-								  "PWM");
-		}
-
-		if (current_mode != last_mode) {
-			if (current_mode == LED_MODE_GPIO) {
-				pwm_apply(0U);
-				gpio_pin_set_dt(&led_gpio, 0);
-				led_on = false;
-				LOG_INF("Modo GPIO ativo: piscando LED");
-				next_gpio_toggle_ms =
-					now + CONFIG_LED_BLINK_INTERVAL_MS;
-			} else {
-				gpio_pin_set_dt(&led_gpio, 0);
-				pwm_pulse_us = 0U;
-				pwm_direction = 1;
-				pwm_apply(pwm_pulse_us);
-				LOG_INF("Modo PWM ativo: fade in/out");
-				next_pwm_step_ms =
-					now + CONFIG_LED_PWM_STEP_INTERVAL_MS;
-			}
-
-			last_mode = current_mode;
-		}
-
-		if (current_mode == LED_MODE_GPIO) {
-			if (now >= next_gpio_toggle_ms) {
-				led_on = !led_on;
-
-				err = gpio_pin_set_dt(&led_gpio, led_on);
-				if (err < 0) {
-					LOG_ERR("Falha ao alternar LED: %d", err);
-				}
-
-				next_gpio_toggle_ms =
-					now + CONFIG_LED_BLINK_INTERVAL_MS;
-			}
-		} else {
-			if (now >= next_pwm_step_ms) {
-				if (pwm_direction > 0) {
-					if ((CONFIG_LED_PWM_PERIOD_US -
-					     pwm_pulse_us) <= pwm_step_us) {
-						pwm_pulse_us =
-							CONFIG_LED_PWM_PERIOD_US;
-						pwm_direction = -1;
-					} else {
-						pwm_pulse_us += pwm_step_us;
-					}
-				} else {
-					if (pwm_pulse_us <= pwm_step_us) {
-						pwm_pulse_us = 0U;
-						pwm_direction = 1;
-					} else {
-						pwm_pulse_us -= pwm_step_us;
-					}
-				}
-
-				pwm_apply(pwm_pulse_us);
-				next_pwm_step_ms =
-					now + CONFIG_LED_PWM_STEP_INTERVAL_MS;
-			}
-		}
-
-		int sleep_ms = MIN(CONFIG_BUTTON_DEBOUNCE_MS, 10);
-
-		if (sleep_ms <= 0) {
-			sleep_ms = 5;
-		}
-
-		k_msleep(sleep_ms);
+		k_sleep(K_FOREVER);
 	}
 
 	return 0;

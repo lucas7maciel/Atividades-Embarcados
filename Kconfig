@@ -1,41 +1,40 @@
-menu "Zephyr"
 source "Kconfig.zephyr"
 
-config LED_BLINK_INTERVAL_MS
-	int "Intervalo do pisca digital (ms)"
-	range 50 5000
-	default 500
-	help
-	  Intervalo, em milissegundos, utilizado no modo digital para alternar o
-	  estado do LED controlado via GPIO.
+menu "Estufa Inteligente"
 
-config LED_PWM_PERIOD_US
-	int "Periodo do PWM (us)"
-	range 100 20000
+config TEMP_VALID_MIN_C
+	int "Temperatura mínima válida (°C)"
+	range -40 125
+	default 18
+
+config TEMP_VALID_MAX_C
+	int "Temperatura máxima válida (°C)"
+	range -40 125
+	default 30
+
+config HUM_VALID_MIN_PCT
+	int "Umidade mínima válida (%)"
+	range 0 100
+	default 40
+
+config HUM_VALID_MAX_PCT
+	int "Umidade máxima válida (%)"
+	range 0 100
+	default 70
+
+config TEMP_PRODUCER_INTERVAL_MS
+	int "Intervalo de geração de temperatura (ms)"
+	range 100 10000
 	default 1000
-	help
-	  Periodo do sinal PWM utilizado para o controle de brilho do LED.
 
-config LED_PWM_STEP_PCT
-	int "Passo do brilho no modo PWM (%)"
-	range 1 50
-	default 5
-	help
-	  Percentual do incremento (ou decremento) aplicado ao duty cycle a cada
-	  passo do efeito de fade. Valores maiores deixam a transicao mais rapida.
+config HUM_PRODUCER_INTERVAL_MS
+	int "Intervalo de geração de umidade (ms)"
+	range 100 10000
+	default 1500
 
-config LED_PWM_STEP_INTERVAL_MS
-	int "Intervalo entre passos do efeito PWM (ms)"
-	range 10 1000
-	default 50
-	help
-	  Intervalo em milissegundos entre cada ajuste de duty cycle no modo PWM.
-
-config BUTTON_DEBOUNCE_MS
-	int "Tempo de debounce do botao (ms)"
-	range 0 500
-	default 50
-	help
-	  Tempo minimo entre leituras consecutivas do botao para evitar rebotes.
+config FILTER_QUEUE_DEPTH
+	int "Capacidade das filas de mensagens"
+	range 2 32
+	default 8
 
 endmenu
