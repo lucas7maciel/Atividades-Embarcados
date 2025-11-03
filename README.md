@@ -1,71 +1,54 @@
 # Atividades de Sistemas Embarcados
 
-Este repositório contém exemplos e exercícios práticos para o curso de sistemas embarcados, utilizando Zephyr RTOS. As atividades abordam conceitos fundamentais como GPIO, PWM, timers e uso do sistema de logs.
+Este repositorio contem exemplos e exercicios praticos desenvolvidos ao longo do curso de sistemas embarcados utilizando Zephyr RTOS. Cada atividade explora um conjunto diferente de APIs, desde temporizadores e GPIO ate comunicacao entre threads com filas de mensagens.
 
----
+## Atividade 3 - Comunicacao entre Threads com Filtro Intermediario
 
-## Atividade 1 – Hello World com Timer
+### Descricao da atividade
 
-### Objetivos
+- Dois produtores (`producer_thread`) simulam sensores de temperatura e umidade usando padroes ciclicos e periodos configurados por `CONFIG_TEMP_PRODUCER_INTERVAL_MS` e `CONFIG_HUM_PRODUCER_INTERVAL_MS`.
+- As leituras sao enfileiradas em `input_queue`. A thread de filtro (`filter_thread`) valida cada amostra conforme limites definidos em `Kconfig`, encaminhando dados validos para `output_queue` e inconsistencias para `error_queue`.
+- A thread consumidora (`consumer_thread`) processa apenas leituras validadas, registrando-as com `LOG_INF`.
+- Um logger dedicado (`error_logger_thread`) consome a fila de erros e publica avisos (`LOG_WRN`) com detalhes da faixa esperada e do valor fora do padrao.
+- Todas as filas usam `K_MSGQ_DEFINE` com capacidade compartilhada e alinhamento constante, assegurando operacao deterministica sem alocacao dinamica.
 
-- Implementar um Hello World periódico utilizando a API de timer do Zephyr.
-- Utilizar diferentes níveis de log para exibir a mensagem.
-- Configurar, via Kconfig, o intervalo de repetição da mensagem.
+### Fluxo de processamento
 
-### Etapas
+- **Produtores**: geram amostras com timestamp (`k_uptime_get`) e colocam em `input_queue`. Logs `LOG_DBG` ajudam a rastrear o fluxo.
+- **Filtro**: chama `validate_reading`, que retorna limites e identifica se a leitura ficou abaixo ou acima do permitido.
+- **Consumidor**: imprime os dados aprovados com o tipo de sensor correspondente.
+- **Logger de erros**: converte inconsistencias em estruturas `sensor_fault` e emite avisos descrevendo a direcao do erro (abaixo/acima da faixa).
 
-1. **Configuração inicial**
-   - Crie um projeto Zephyr básico.
-   - Habilite o módulo de log no arquivo `prj.conf`.
-   - Defina uma opção no `Kconfig` para configurar o intervalo do timer.
+### Regras de validacao
 
-2. **Implementação do timer**
-   - Implemente um timer periódico usando a API de timers do Zephyr.
-   - No callback do timer, imprima a mensagem “Hello World”.
-   - O intervalo do timer deve ser configurável via Kconfig.
+- Temperatura valida entre `CONFIG_TEMP_VALID_MIN_C` e `CONFIG_TEMP_VALID_MAX_C` (padrao 18 a 30 graus Celsius).
+- Umidade valida entre `CONFIG_HUM_VALID_MIN_PCT` e `CONFIG_HUM_VALID_MAX_PCT` (padrao 40 a 70%).
+- Fora dessas faixas, a leitura e classificada como `SENSOR_ERR_TOO_LOW` ou `SENSOR_ERR_TOO_HIGH` e enviada para o canal de erro.
 
-3. **Uso dos níveis de log**
-   - Utilize diferentes níveis de log (`LOG_INF`, `LOG_DBG`, `LOG_ERR`) para exibir a mensagem.
-   - Teste a alteração do nível de log no `prj.conf` e observe o comportamento.
+### Parametros configuraveis (Kconfig)
 
----
+- `CONFIG_TEMP_VALID_MIN_C` e `CONFIG_TEMP_VALID_MAX_C`: limites de temperatura aceitos.
+- `CONFIG_HUM_VALID_MIN_PCT` e `CONFIG_HUM_VALID_MAX_PCT`: faixa valida de umidade.
+- `CONFIG_TEMP_PRODUCER_INTERVAL_MS`: intervalo de producao do sensor de temperatura.
+- `CONFIG_HUM_PRODUCER_INTERVAL_MS`: intervalo de producao do sensor de umidade.
+- `CONFIG_FILTER_QUEUE_DEPTH`: profundidade das filas de entrada, saida e erro.
 
-## Atividade 2 – Controle de Brilho de LED com GPIO, PWM e Botão
+### Arquivos principais
 
-### Objetivos
+- `src/main.c`: concentra as quatro threads, estruturas `sensor_reading`/`sensor_fault` e a logica de validacao.
+- `prj.conf`: define niveis de log, tamanhos de pilha e intervalos padrao das threads produtoras.
+- `Kconfig`: expoe as faixas validas e a capacidade das filas para customizacao via `menuconfig` ou `west build -t menuconfig`.
 
-- Compreender o uso de GPIO como entrada e saída.
-- Aplicar PWM para controlar o brilho de um LED.
-- Implementar interação entre botão e LED.
+### Como executar o projeto
 
-### Etapas
+1. Prepare o ambiente Zephyr (instale o SDK, configure `ZEPHYR_BASE`, instale `west` e rode `west update`).
+2. A partir do diretorio do projeto, execute `west build -b <placa> -p auto .` selecionando uma placa suportada (por exemplo `qemu_x86` para testar em emulacao ou `nrf52840dk_nrf52840` para hardware real).
+3. Realize o flash com `west flash` (ou `west build -t run` se estiver usando QEMU) mantendo a placa conectada.
+4. Abra o console de logs (`west build -t run`, `west debug`, `west espressif monitor`, `minicom`, etc.).
+5. Analise a saida: mensagens `LOG_INF` indicam dados aprovados consumidos, enquanto `LOG_WRN` sinalizam leituras fora da faixa com informacao da faixa esperada e timestamp.
 
-1. **Configuração simples**
-   - Configure um pino GPIO como saída.
-   - Escreva um código para ligar e desligar o LED.
-   - Ajuste o tempo de piscar do LED.
+## Observacoes
 
-2. **Controle do LED com botão**
-   - Configure outro pino GPIO como entrada para o botão.
-   - Altere o comportamento do LED quando o botão for pressionado.
-
-3. **Controle do brilho via PWM**
-   - Configure um pino com função PWM.
-   - Implemente a variação do duty cycle para modificar o brilho do LED.
-   - Crie um efeito de transição de brilho (fade in/fade out).
-
-4. **Integração botão + PWM**
-   - Defina dois modos de operação:
-     - **Modo 1:** LED acende/apaga normalmente (digital).
-     - **Modo 2:** LED apresenta variação gradual de brilho (PWM).
-   - Use o botão para alternar entre os modos.
-
----
-
-## Observações
-
-- Utilize o Zephyr RTOS e consulte a documentação oficial para detalhes sobre APIs de GPIO, PWM, timers e logs.
-- Os parâmetros de configuração devem ser definidos nos arquivos `prj.conf` e `Kconfig` do projeto.
-- Teste as funcionalidades em hardware compatível ou emuladores suportados pelo Zephyr.
-
----
+- Para a Atividade 2, garanta que os aliases `led0`, `pwm_led0` e `sw0` estejam definidos no device tree da placa; ajuste um arquivo em `boards/` caso necessario.
+- Para a Atividade 3, ajuste os limites e intervalos no `Kconfig` conforme o comportamento desejado e utilize `CONFIG_FILTER_QUEUE_DEPTH` maior se notar filas cheias.
+- Teste sempre que possivel em hardware real para validar temporizacoes e perifericos; em ausencia de hardware, o QEMU e uma alternativa util para inspecionar logs e fluxo de threads.
