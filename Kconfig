@@ -1,12 +1,41 @@
 menu "Zephyr"
 source "Kconfig.zephyr"
 
-config HELLO_TIMER_PERIOD_MS
-	int "Intervalo do Hello World (ms)"
-	range 100 10000
+config LED_BLINK_INTERVAL_MS
+	int "Intervalo do pisca digital (ms)"
+	range 50 5000
+	default 500
+	help
+	  Intervalo, em milissegundos, utilizado no modo digital para alternar o
+	  estado do LED controlado via GPIO.
+
+config LED_PWM_PERIOD_US
+	int "Periodo do PWM (us)"
+	range 100 20000
 	default 1000
 	help
-	  Ajusta o periodo, em milissegundos, do timer periodico que imprime a
-	  mensagem Hello World. Valores muito baixos podem congestionar o log.
+	  Periodo do sinal PWM utilizado para o controle de brilho do LED.
+
+config LED_PWM_STEP_PCT
+	int "Passo do brilho no modo PWM (%)"
+	range 1 50
+	default 5
+	help
+	  Percentual do incremento (ou decremento) aplicado ao duty cycle a cada
+	  passo do efeito de fade. Valores maiores deixam a transicao mais rapida.
+
+config LED_PWM_STEP_INTERVAL_MS
+	int "Intervalo entre passos do efeito PWM (ms)"
+	range 10 1000
+	default 50
+	help
+	  Intervalo em milissegundos entre cada ajuste de duty cycle no modo PWM.
+
+config BUTTON_DEBOUNCE_MS
+	int "Tempo de debounce do botao (ms)"
+	range 0 500
+	default 50
+	help
+	  Tempo minimo entre leituras consecutivas do botao para evitar rebotes.
 
 endmenu
