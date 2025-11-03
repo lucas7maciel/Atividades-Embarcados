@@ -1,71 +1,29 @@
 # Atividades de Sistemas Embarcados
 
-Este repositório contém exemplos e exercícios práticos para o curso de sistemas embarcados, utilizando Zephyr RTOS. As atividades abordam conceitos fundamentais como GPIO, PWM, timers e uso do sistema de logs.
+Este repositorio contem exemplos e exercicios praticos desenvolvidos para o curso de sistemas embarcados utilizando Zephyr RTOS. Cada atividade explora um conjunto diferente de APIs do sistema operacional, incluindo temporizadores, GPIO, PWM, filas de mensagens e comunicacao por ZBus.
 
----
+## Atividade 4 - Sincronizacao SNTP via ZBus
 
-## Atividade 1 – Hello World com Timer
+### Descricao
 
-### Objetivos
+- A thread cliente SNTP sincroniza o relogio do sistema com o servidor configurado em `CONFIG_SNTP_SERVER_HOSTNAME` e `CONFIG_SNTP_SERVER_PORT`, utilizando `sntp_simple`.
+- O horario sincronizado e encapsulado em `struct time_message`, contendo epoch em segundos, milissegundos fracionarios, valor combinado em ms e a estrutura `struct tm`.
+- As leituras sao publicadas no canal ZBus `time_channel` (definido com `ZBUS_CHAN_DEFINE`) e entregues a dois assinantes (`logger_sub` e `app_sub`).
+- A thread logger registra o horario completo em UTC, servindo como trilha de auditoria.
+- A thread de aplicacao calcula o intervalo desde a ultima atualizacao para demonstrar uso do horario distribuido.
+- Falhas na sincronizacao geram apenas `LOG_WRN`, sem publicar novos dados, garantindo que os assinantes recebam apenas horarios validos.
 
-- Implementar um Hello World periódico utilizando a API de timer do Zephyr.
-- Utilizar diferentes níveis de log para exibir a mensagem.
-- Configurar, via Kconfig, o intervalo de repetição da mensagem.
+### Como executar
 
-### Etapas
+1. Configure rede e servidor SNTP: ajuste `CONFIG_SNTP_SERVER_HOSTNAME`, `CONFIG_SNTP_SERVER_PORT` e demais opcoes em `prj.conf` (`CONFIG_NET_CONFIG_*`).
+2. Certifique-se de que a placa escolhida suporta networking (ex.: `qemu_x86`, `frdm_k64f`, `nrf52840dk_nrf52840`).
+3. Compile com `west build -b <placa> -p auto .`.
+4. Execute `west flash` ou `west build -t run` (para QEMU, configure TAP/SLIP conforme necessario).
+5. Abra o console de logs e verifique: mensagens do logger mostram data/hora UTC, enquanto a aplicacao registra o delta entre sincronizacoes.
 
-1. **Configuração inicial**
-   - Crie um projeto Zephyr básico.
-   - Habilite o módulo de log no arquivo `prj.conf`.
-   - Defina uma opção no `Kconfig` para configurar o intervalo do timer.
+## Observacoes Gerais
 
-2. **Implementação do timer**
-   - Implemente um timer periódico usando a API de timers do Zephyr.
-   - No callback do timer, imprima a mensagem “Hello World”.
-   - O intervalo do timer deve ser configurável via Kconfig.
-
-3. **Uso dos níveis de log**
-   - Utilize diferentes níveis de log (`LOG_INF`, `LOG_DBG`, `LOG_ERR`) para exibir a mensagem.
-   - Teste a alteração do nível de log no `prj.conf` e observe o comportamento.
-
----
-
-## Atividade 2 – Controle de Brilho de LED com GPIO, PWM e Botão
-
-### Objetivos
-
-- Compreender o uso de GPIO como entrada e saída.
-- Aplicar PWM para controlar o brilho de um LED.
-- Implementar interação entre botão e LED.
-
-### Etapas
-
-1. **Configuração simples**
-   - Configure um pino GPIO como saída.
-   - Escreva um código para ligar e desligar o LED.
-   - Ajuste o tempo de piscar do LED.
-
-2. **Controle do LED com botão**
-   - Configure outro pino GPIO como entrada para o botão.
-   - Altere o comportamento do LED quando o botão for pressionado.
-
-3. **Controle do brilho via PWM**
-   - Configure um pino com função PWM.
-   - Implemente a variação do duty cycle para modificar o brilho do LED.
-   - Crie um efeito de transição de brilho (fade in/fade out).
-
-4. **Integração botão + PWM**
-   - Defina dois modos de operação:
-     - **Modo 1:** LED acende/apaga normalmente (digital).
-     - **Modo 2:** LED apresenta variação gradual de brilho (PWM).
-   - Use o botão para alternar entre os modos.
-
----
-
-## Observações
-
-- Utilize o Zephyr RTOS e consulte a documentação oficial para detalhes sobre APIs de GPIO, PWM, timers e logs.
-- Os parâmetros de configuração devem ser definidos nos arquivos `prj.conf` e `Kconfig` do projeto.
-- Teste as funcionalidades em hardware compatível ou emuladores suportados pelo Zephyr.
-
----
+- Ajuste os parametros em `Kconfig` e `prj.conf` conforme o hardware ou o cenario de teste.
+- Garanta que aliases de hardware (como `led0`, `pwm_led0`, `sw0`) estejam presentes no device tree da placa ou em arquivos overlay.
+- Para atividades que dependem de rede, valide a configuracao de enderecos IPv4 e a disponibilidade do servidor remoto antes de executar.
+- Utilize `west build -t menuconfig` para alterar rapidamente configuracoes expostas no `Kconfig`.
